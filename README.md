@@ -7,7 +7,7 @@ The files contained in this repository accompany the manuscript **_Polyclonality
 2. Pipeline for pseudo-bulk RNA sequencing (Figure xx)
 3. Mutational probability analysis in Apc for major, minor and monoclonal samples (Figure xx)
 4. Confetti crypt labelling simulation (_Extended Data Figure 1f_)
-5. Random collision modelling (Figure xx)
+5. Random collision modelling (_Extended Data Figure 1n-p_)
 
 ## Downloading data
 Raw sequencing files have been deposited to:
