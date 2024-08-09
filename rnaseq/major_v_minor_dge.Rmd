@@ -1,0 +1,652 @@
+---
+title: "Differential gene expression analysis" 
+subtitle: "Major clones v minor clones"
+output: 
+    html_notebook:
+         code_folding: hide
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include = FALSE, message = FALSE, warning = FALSE}
+#librarian::shelf(BiocManager, Biobase, readxl, ggpubr, DESeq2,
+                # DT, ggfortify, ggrepel, ggdendro, knitr, patchwork,
+                # pheatmap, circlize, ComplexHeatmap, clusterProfiler, EnhancedVolcano, msigdbr,
+                # org.Mm.eg.db, ashr, tidyverse, update_all = TRUE)
+
+library(DESeq2)
+library(DT)
+library(ggfortify)
+library(ggrepel)
+library(ggdendro)
+#library(knitr)
+library(patchwork)
+library(pheatmap)
+library(readxl)
+library(circlize)
+library(ComplexHeatmap)
+library(clusterProfiler)
+library(EnhancedVolcano)
+library(msigdbr)
+library(org.Mm.eg.db)
+library(tidyverse)
+#projDir <- "/Users/sadien01/delivery_20221109/"
+#opts_knit$set(root.dir = projDir)
+#opts_chunk$set(cache = TRUE)
+```
+
+```{r getData, include=FALSE}
+txi <- readRDS("/Users/sadien01/OneDrive - CRUK Cambridge Institute/Data/Bulk RNAseq experiment/Analysis_ash/txi.rds")
+
+# load meta data and filter to only major/minor clones
+samplesheet <- read_tsv("/Users/sadien01/OneDrive - CRUK Cambridge Institute/Data/Bulk RNAseq experiment/delivery_20221109//samplesheet.full.tsv", 
+                        show_col_types = FALSE)   %>%
+                dplyr::filter(Clonality=="polyclonal")
+
+txi <- modify_if(txi, is.matrix, ~.x[,samplesheet$SampleName])
+all(samplesheet$SampleName==colnames(txi$counts))
+# [1] TRUE
+
+annot <- read_tsv("/Users/sadien01/OneDrive - CRUK Cambridge Institute/Data/Bulk RNAseq experiment/annotation.tsv",
+                 col_names = c("GeneID", "Symbol", "Description"))
+```
+
+# Preamble
+
+In the analysis we will contrast the major and minor clones of the
+polyclonal tumors.
+
+The table below lists the samples included in the analysis.
+
+```{r}
+samplesheet %>%   
+  dplyr::select(SampleName, SampleID, MouseID, 
+         Sex, Clonality, CloneOrdering, Location) %>% 
+    datatable(options = list(dom="t", pageLength = nrow(samplesheet)),
+              rownames = FALSE)
+```
+
+# Counts per sample
+
+```{r plotData}
+rawCounts <- round(txi$counts, 0) 
+```
+
+The plot below shows the results of quantification of gene expression
+with Salmon in terms of the total estimated read counts across all
+genes.
+
+```{r readCounts, fig.width = 12, fig.height = 10}
+dat <- rawCounts %>%
+    as.data.frame() %>%  
+    summarise(across(everything(), sum)) %>%  
+    pivot_longer(names_to = "SampleName", values_to = "Counts", everything()) %>%  
+    left_join(samplesheet, by = "SampleName") 
+
+dat %>%  
+    ggplot(aes(x = SampleName, y = Counts)) +
+        geom_col(aes(fill = MouseID), colour="black") +
+        geom_hline(yintercept = 2e7, colour="#53A202", linetype = 2) +
+        facet_wrap(vars(Clonality), scale = "free_x") + 
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+# Count density
+
+The plots below show count density on log2 scale for each sample. Genes
+that were not detected in any sample have been omitted.
+
+```{r plotDat, echo = FALSE, message = FALSE}
+rawCounts <- round(txi$counts, 0) 
+keep <- rowSums(rawCounts) > 0
+filtCnts <- rawCounts[keep, ]
+nGenes <- nrow(filtCnts)
+vstCnts <- vst(filtCnts)
+rownames(vstCnts) <- rownames(filtCnts)
+
+nGenes <- nrow(filtCnts)
+```
+
+Genes that were not detected in any sample were omitted, leaving
+`r nGenes` genes in the count matrix.
+
+Counts were normalised using the `vst` function from `DESeq2` prior to
+analysis.
+
+```{r countDensity, fig.width = 12, fig.height = 14}
+raw <- filtCnts %>% 
+    `+`(1) %>% 
+    log2() %>% 
+    as.data.frame() %>% 
+    rownames_to_column("Geneid") %>% 
+    pivot_longer(names_to = "Sample", values_to = "Count", -Geneid) %>% 
+    ggplot(aes(x=Count)) +
+        geom_density(aes(colour = Sample)) +
+        labs(x = "log2(Counts)", title = "Raw counts") +
+        guides(colour = "none")
+
+norm <- vstCnts %>% 
+    as.data.frame() %>% 
+    rownames_to_column("Geneid") %>% 
+    pivot_longer(names_to = "Sample", values_to = "Count", -Geneid) %>% 
+    ggplot(aes(x=Count)) +
+        geom_density(aes(colour = Sample)) +
+        labs(x = "log2(Counts)", title = "vst Normalised counts") +
+        guides(colour = "none")
+
+raw / norm
+```
+
+# Gene filtering
+
+Genes are filtered to eliminate counts that are just due to noise. Based
+on the pattern of count distributions in the density plots, raw counts
+were filtered for genes with at least 2\^6 reads in at least 1 sample.
+
+## Density plots with filtered data
+
+```{r filterDat}
+keep <- rowMax(rawCounts) > 2^6
+
+filtCnts <- rawCounts[keep, ]
+
+vstCnts <- vst(filtCnts)
+rownames(vstCnts) <- rownames(filtCnts)
+```
+
+```{r countDensityFiltered, fig.width = 12, fig.height = 10}
+raw <- filtCnts %>%
+    `+`(1) %>% 
+    log2() %>% 
+    as.data.frame() %>% 
+    rownames_to_column("Geneid") %>% 
+    pivot_longer(names_to = "Sample", values_to = "Count", -Geneid) %>% 
+    ggplot(aes(x=Count)) +
+        geom_density(aes(colour = Sample)) +
+        labs(x = "log2(Counts)", title = "Raw counts")  +
+        guides(colour = "none")
+
+norm <- vstCnts %>% 
+    as.data.frame() %>% 
+    rownames_to_column("Geneid") %>% 
+    pivot_longer(names_to = "Sample", values_to = "Count", -Geneid) %>% 
+    ggplot(aes(x=Count)) +
+        geom_density(aes(colour = Sample)) +
+        labs(x = "log2(Counts)", title = "vst Normalised counts")  +
+        guides(colour = "none")
+
+raw / norm + plot_layout(guides = "collect")
+```
+
+# Unsupervised clustering
+
+## Principle component analysis {.tabset}
+
+```{r}
+plotPCA2x <- function(fillgrp, pcDat, meta = samplesheet){
+    p1 <- autoplot(pcDat,
+                   data = meta, 
+                   fill = fillgrp, 
+                   size=5,
+                   shape=21) +
+            theme(legend.position="bottom")
+
+    p2 <- autoplot(pcDat,
+                   x = 2,
+                   y = 3,
+                   data = meta, 
+                   fill = fillgrp, 
+                   size=5,
+                   shape=21) +
+            theme(legend.position="bottom")
+    list(P1 = p1, P2 = p2)
+}
+```
+
+Counts were normalised using the `vst` function from `DESeq2` prior to
+analysis.Principle component analysis and clustering were carried out
+using the top 500 most variable genes.
+
+```{r pca1}
+rvs <- rowVars(vstCnts)
+hvgs <- order(rvs, decreasing = TRUE)[1:500]
+
+pcDat <- t(vstCnts[hvgs, ]) %>% prcomp()
+```
+
+### Clone Ordering
+
+```{r pca_cloneordering, fig.width = 12, fig.height = 7}
+pltList <- plotPCA2x("CloneOrdering", pcDat)
+pltList$P1 + pltList$P2 +  plot_layout(guides = "collect") &
+    theme(legend.position = 'bottom') + theme_bw()
+```
+
+### Tumour ID
+
+The black lines link major and minor clones from the same tumour.
+
+```{r pca_Tumour_ID, fig.width = 12, fig.height = 7}
+p1 <- autoplot(pcDat,
+               data = samplesheet, 
+               fill = "TumourID", 
+               size=5,
+               shape = "CloneOrdering") +
+        scale_shape_manual(values = c(major = 25, minor = 24)) + 
+        theme(legend.position="bottom") +
+        guides(fill=guide_legend(override.aes=list(shape=21)))
+
+p2 <- autoplot(pcDat,
+               x = 2,
+               y = 3,
+               data = samplesheet, 
+               fill = "TumourID", 
+               size=5,
+               shape = "CloneOrdering") +
+        scale_shape_manual(values = c(major = 25, minor = 24)) + 
+        theme(legend.position="bottom") +
+        guides(fill=guide_legend(override.aes=list(shape=21)))
+
+p1.dat <- p1$data[,1:2] %>%
+    as.data.frame() %>%
+    rownames_to_column("Sample") %>%
+    mutate(TumourID = str_remove(Sample, "[ab]$")) %>%
+    mutate(CO = str_extract(Sample, "[ab]$")) %>%
+    dplyr::select(TumourID, CO, PC1, PC2)  %>%
+    pivot_wider(names_from = CO, values_from = c("PC1", "PC2"))
+
+p1 <- p1 +
+    geom_segment(data = p1.dat,
+                 aes(x = PC1_a, y = PC2_a, xend = PC1_b, yend = PC2_b))
+
+
+p2.dat <- p2$data[,1:2] %>%
+    as.data.frame() %>%
+    rownames_to_column("Sample") %>%
+    mutate(TumourID = str_remove(Sample, "[ab]$")) %>%
+    mutate(CO = str_extract(Sample, "[ab]$")) %>%
+    dplyr::select(TumourID, CO, PC2, PC3)  %>%
+    pivot_wider(names_from = CO, values_from = c("PC2", "PC3"))
+
+p2 <- p2 +
+    geom_segment(data = p2.dat,
+                 aes(x = PC2_a, y = PC3_a, xend = PC2_b, yend = PC3_b))
+
+p1 + p2 +  plot_layout(guides = "collect") &
+    theme(legend.position = 'bottom')
+```
+
+### Location
+
+```{r pca_location, fig.width = 12, fig.height = 7}
+pltList <- plotPCA2x("Location", pcDat) 
+pltList$P1 + pltList$P2 +  plot_layout(guides = "collect") &
+    theme(legend.position = 'bottom')
+```
+
+### Mouse
+
+```{r pca_mouse, fig.width = 12, fig.height = 7}
+pltList <- plotPCA2x("MouseID", pcDat) 
+pltList$P1 + pltList$P2 +  plot_layout(guides = "collect") &
+    theme(legend.position = 'bottom')
+```
+
+### Cull Date
+
+```{r pca_cull, fig.width = 12, fig.height = 7}
+pltList <- plotPCA2x("cull_date", pcDat) 
+pltList$P1 + pltList$P2 +  plot_layout(guides = "collect") &
+    theme(legend.position = 'bottom')
+```
+
+### Extraction Date
+
+```{r pca_extraction, fig.width = 12, fig.height = 7}
+pltList <- plotPCA2x("extraction_date", pcDat) 
+pltList$P1 + pltList$P2 +  plot_layout(guides = "collect") &
+    theme(legend.position = 'bottom')
+```
+
+## Hierachical clustering
+
+```{r fig.width  =  12, fig.height = 14}
+rvs <- rowVars(vstCnts)
+hvgs <- order(rvs, decreasing = TRUE)[1:500]
+dendro.dat <- t(vstCnts[hvgs,]) %>%
+   dist(method = "euclidean") %>%
+   hclust() %>%
+   as.dendrogram() %>%
+   dendro_data()
+
+labelDat <- dendro.dat$labels %>%
+    mutate(SampleName = as.character(label)) %>%
+    left_join(samplesheet, "SampleName")
+
+axisBreaks <- pretty(dendro.dat$segments$yend)[-1] %>% head(-1)
+
+ggplot(dendro.dat$segment) +
+    geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) +
+    geom_label(data = labelDat,
+              aes(x = x,
+                  y = y,
+                  label = SampleID,
+                  fill = CloneOrdering),
+                  hjust = 0,
+                  nudge_y = 1) +
+    labs(x = NULL, y = "Distance", title = NULL) +
+    scale_y_reverse(expand = c(0.2, 0), breaks = axisBreaks) +
+    coord_flip() +
+    theme(axis.title.y = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          plot.title = element_text(hjust = 0.5),
+          panel.background = element_blank())
+```
+
+## Correlation Matrix
+
+```{r fig.width=8, fig.height=8}
+plotDat <- cor(vstCnts[hvgs,])
+samIDs <- samplesheet %>%
+  arrange(SampleID) %>% 
+  pull(SampleID, SampleName)
+plotDat <- plotDat[names(samIDs), names(samIDs)]
+rownames(plotDat) <- samIDs
+colnames(plotDat) <- samIDs
+numberMat <- round(plotDat, 2)
+pheatmap(plotDat,
+         colorRampPalette(RColorBrewer::brewer.pal(n = 7, name = "YlOrRd"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE, 
+         display_numbers = numberMat)
+```
+
+# Differential gene expression analysis
+
+Differential expression analysis is carried out using `DESeq2`. Genes
+are filtered to keep genes with at least 30 counts across all samples.
+
+```{r DGE}
+keep <- rowSums(txi$counts) > 30
+
+model <- as.formula(~ TumourID + CloneOrdering)
+
+ddsObj <- DESeqDataSetFromTximport(txi = txi, 
+                                  colData = samplesheet,
+                                  design = model)
+ddsObj <- ddsObj[keep, ]
+
+ddsObj <- ddsObj %>% 
+    estimateSizeFactors() %>% 
+    estimateDispersions() %>% 
+    nbinomWaldTest()
+```
+
+## Dispersion plot
+
+```{r dispPlot, fig.width = 6, fig.height = 5}
+plotDispEsts(ddsObj)
+```
+
+### Summary Results tables
+
+```{r DGEres}
+res <- results(ddsObj, 
+               contrast = c("CloneOrdering", "major", "minor"), 
+               alpha = 0.05)
+```
+
+The following table shows the number of genes tested, the number
+filtered out by DESeq2 and the numbers of the remaining genes that are
+up-/down-regulated with FDR \< 0.05.
+
+```{r summaryResults}
+tibble(Contrast = "Major clone v Minor clone") %>%
+    mutate(Total = nrow(res)) %>%  
+    mutate(Filtered = sum(is.na(res$padj))) %>%  
+    mutate(Upregulated = sum(res$padj< 0.05 & 
+                             res$log2FoldChange> 0, na.rm = TRUE)) %>%   
+    mutate(Downregulated =sum(res$padj < 0.05 & 
+                              res$log2FoldChange< 0, na.rm = TRUE)) %>%
+    datatable(options = list(dom = "t"), rownames = FALSE)
+```
+
+## Summary plots
+
+DESeq2 provides a function called `lfcShrink` that shrinks log-Fold
+Change (LFC) estimates towards zero using and empirical Bayes procedure.
+The reason for doing this is that there is high variance in the LFC
+estimates when counts are low and this results in lowly expressed genes
+appearing to show greater differences between groups than highly
+expressed genes. The `lfcShrink` method compensates for this and allows
+better visualisation and ranking of genes. We will use it for our
+visualisation of the data.
+
+```{r shrinkandPlotFunction, include = FALSE}
+shrinkRes <- function(resObj, dds = ddsObj){
+    lfcShrink(dds, res = resObj, type = "ashr")
+}
+```
+
+```{r include=FALSE, message=FALSE}
+shr <- shrinkRes(res)
+```
+
+Top ten genes by FDR:
+
+```{r}
+shrTab <- shr  %>%  
+          as.data.frame() %>%  
+          rownames_to_column("GeneID") %>%
+          left_join(annot) %>%
+          mutate(Label = ifelse(pvalue < 10^-5.2, Symbol, ""))
+shrTab %>% 
+    dplyr::filter(pvalue < 10^-5.2) %>%
+    arrange(padj) %>%
+    dplyr::select(Symbol, Description, FDR = padj, logFC = log2FoldChange) %>%
+    mutate(across(where(is.numeric), signif, 3)) %>%
+    datatable(options = list(dom="t"), rownames = FALSE)
+
+# Let's save the differentially expressed gene list for use somewhere else
+deg_list <- shrTab %>% 
+    dplyr::filter(padj < 0.05) %>%
+    arrange(padj) %>%
+    dplyr::select(Symbol, Description, FDR = padj, logFC = log2FoldChange) %>%
+    mutate(across(where(is.numeric), signif, 3)) %>%
+  as.data.frame()
+#write.csv(deg_list, "/Users/sadien01/OneDrive - CRUK Cambridge Institute/Data/Bulk RNAseq experiment/deg_list.csv")
+```
+
+Below are shown, for each contrast, a p-value histogram, a volcano plot
+and an MA plot.
+
+```{r, message = FALSE, warning = FALSE, fig.height = 5, fig.width=14}
+pHist <- res %>%  
+    as.data.frame() %>%
+    ggplot(aes(x = pvalue)) +
+        geom_histogram(breaks = seq(0, 1, length.out = 21), 
+                       fill = "#566358", 
+                       colour = "#111211")
+
+volPlot <- shrTab %>%  
+    as_tibble() %>%  
+    mutate(phred = -log10(pvalue)) %>%  
+    mutate(sig = case_when(
+                           padj < 0.01 ~ "FDR < 0.01",
+                           padj < 0.05 ~ "FDR < 0.05",
+                           is.na(padj) ~ "Filtered",
+                           TRUE ~ "FDR > 0.05")) %>%  
+    mutate(sig = fct_relevel(sig, c("Filtered", "FDR > 0.05", 
+                                    "FDR < 0.05", "FDR < 0.01"))) %>%  
+    ggplot(aes(x = log2FoldChange, y = phred)) +
+        geom_point(aes(fill = sig), shape = 21) +
+        geom_text_repel(aes(label = Label)) +
+        scale_fill_manual(values = c("#bdbdbd", "#a1d99b", "#feb24c", "#f03b20")) +
+        labs(x = "log2(Fold Change)", y = "-log10(p value)", fill = NULL)
+
+maPlot <- shrTab %>%  
+    as_tibble() %>%  
+    mutate(A = log2(baseMean)) %>%  
+    mutate(sig = case_when(
+                           padj < 0.01 ~ "FDR < 0.01",
+                           padj < 0.05 ~ "FDR < 0.05",
+                           is.na(padj) ~ "Filtered",
+                           TRUE ~ "FDR > 0.05")) %>%  
+    mutate(sig = fct_relevel(sig, c("Filtered", "FDR > 0.05", 
+                                    "FDR < 0.05", "FDR < 0.01"))) %>%  
+    ggplot(aes(x = A, y = log2FoldChange)) +
+        geom_point(aes(fill = sig), shape = 21) +
+        scale_fill_manual(values = c("#bdbdbd", "#a1d99b", "#feb24c", "#f03b20")) +
+        labs(y = "log2(Fold Change)", x = "log2(Mean Counts)", fill = NULL)
+
+pHist + volPlot + maPlot + 
+    plot_layout(guides = "collect")
+```
+
+#Doing the volcano plot:
+```{r}
+shrTab %>%  
+    as_tibble() %>%  
+    filter(Symbol != "NA.") %>%
+    filter(!str_detect(Symbol, "Gm")) %>%
+    mutate(phred = -log10(pvalue)) %>%  
+    mutate(sig = case_when(
+                           padj < 0.01 ~ "FDR < 0.01",
+                           padj < 0.05 ~ "FDR < 0.05",
+                           is.na(padj) ~ "Filtered",
+                           TRUE ~ "FDR > 0.05")) %>%  
+    mutate(sig = fct_relevel(sig, c("Filtered", "FDR > 0.05", 
+                                    "FDR < 0.05", "FDR < 0.01"))) %>%  
+    ggplot(aes(x = log2FoldChange, y = phred)) +
+        geom_point(aes(fill = sig), shape = 21, size = 4) +
+        geom_text_repel(aes(label = Label)) +
+        scale_fill_manual(values = c("#bdbdbd", "#a1d99b", "#feb24c", "#f03b20")) +
+        labs(x = "log2(Fold Change)", y = "-log10(p value)", fill = NULL) + theme_bw()
+
+int_genes <- c("A4gnt", "Hpd", "Reg4", "Atoh1", "Chgb", "Spink4",
+               "Chga", "Wnt3", "Muc2", "Lyz1", "Lgr5", "Bmi1", "Tead2",
+               "Ascl2", "Bex4", "Bex1", "Fzd6", "Fzd3", "Tgif2", "Elapor")
+
+points_to_label <- shrTab %>%  
+    as_tibble() %>% filter(Symbol %in% int_genes) %>% 
+  mutate(phred = -log10(padj)) %>%  
+    mutate(sig = case_when(
+                           padj < 0.01 ~ "FDR < 0.01",
+                           padj < 0.05 ~ "FDR < 0.05",
+                           is.na(padj) ~ "Filtered",
+                           TRUE ~ "FDR > 0.05")) %>%  
+    mutate(sig = fct_relevel(sig, c("Filtered", "FDR > 0.05", 
+                                    "FDR < 0.05", "FDR < 0.01")))
+  
+  
+  
+  
+shrTab %>%  
+    as_tibble() %>%  
+    filter(Symbol != "NA.") %>%
+    filter(!str_detect(Symbol, "Gm")) %>%
+    mutate(phred = -log10(padj)) %>%  
+    mutate(sig = case_when(
+                           padj < 0.01 ~ "FDR < 0.01",
+                           padj < 0.05 ~ "FDR < 0.05",
+                           is.na(padj) ~ "Filtered",
+                           TRUE ~ "FDR > 0.05")) %>%  
+    mutate(sig = fct_relevel(sig, c("Filtered", "FDR > 0.05", 
+                                    "FDR < 0.05", "FDR < 0.01"))) %>%  
+    ggplot(aes(x = log2FoldChange, y = phred)) +
+        geom_point(aes(fill = sig), shape = 21, size = 4) +
+        #geom_text_repel(aes(label = Label)) +
+        scale_fill_manual(values = c("#bdbdbd", "#a1d99b", "#feb24c", "#f03b20")) +
+        labs(x = "log2(Fold Change)", y = "-log10(p value)", fill = NULL) + 
+        geom_text_repel(data = points_to_label,
+                  aes(label = Symbol), 
+                  box.padding = 0.1,
+                  show.legend = FALSE,
+                  max.overlaps = Inf)
+                            
+
+
+
+shrTab %>%  
+    as_tibble() %>%  
+    filter(Symbol != "NA.") %>%
+    filter(!str_detect(Symbol, "Gm")) %>%
+    mutate(phred = -log10(padj)) %>%  
+    mutate(sig = case_when(
+                           padj < 0.05 ~ "FDR < 0.05",
+                           padj < 0.10 ~ "FDR < 0.10",
+                           is.na(padj) ~ "Filtered",
+                           TRUE ~ "FDR > 0.10")) %>%  
+    mutate(sig = fct_relevel(sig, c("Filtered", "FDR > 0.10", 
+                                    "FDR < 0.10", "FDR < 0.05"))) %>%  
+    ggplot(aes(x = log2FoldChange, y = phred)) +
+        geom_point(aes(fill = sig), shape = 21, size = 4) +
+        #geom_text_repel(aes(label = Label)) +
+        scale_fill_manual(values = c("#bdbdbd", "#a1d99b", "#feb24c", "#f03b20")) +
+        labs(x = "log2(Fold Change)", y = "-log10(p value)", fill = NULL) + 
+        geom_text_repel(data = points_to_label,
+                  aes(label = Symbol), 
+                  box.padding = 0.1,
+                  show.legend = FALSE,
+                  max.overlaps = Inf) + theme_bw()
+
+```
+
+
+# Heatmaps
+
+```{r}
+
+# get the top genes
+sigGenes <- shrTab %>% 
+    top_n(50, wt=-padj) %>% 
+    pull("GeneID")
+
+# filter the data for the top 100 by padj
+plotDat <- vst(ddsObj)[sigGenes,] %>% 
+  assay()
+
+z.mat <- t(scale(t(plotDat), center=TRUE, scale=TRUE))
+
+# colour palette
+myPalette <- c("royalblue3", "ivory", "orangered3")
+myRamp <- colorRamp2(c(-2, 0, 2), myPalette)
+Heatmap(z.mat, name = "z-score",
+        col = myRamp,
+        show_row_names = TRUE,
+        row_names_gp = gpar(fontsize = 8))
+```
+
+```{r}
+#Add gene symbol to z.mat
+repName <- pull(annot, Symbol, GeneID)
+rn <- rownames(z.mat)
+
+rownames(z.mat) <- str_replace_all(rownames(z.mat), repName)
+
+
+
+#Adding annotation labels
+annotation_col_labels <- samplesheet %>%
+  dplyr::filter(Clonality == "polyclonal") %>%
+  dplyr::select(CloneOrdering)
+annotation_col_labels <-as.data.frame(annotation_col_labels)
+row.names(annotation_col_labels) <- samplesheet$SampleName
+
+my_colour = list(
+    CloneOrdering = c(major = "#5977ff", minor = "#f74747",
+                      not_applicable = "#cc4ee0"))
+
+ewe <- pheatmap(z.mat, annotation_col = annotation_col_labels,
+         annotation_colors = my_colour,
+         cutree_rows = 2,
+         cutree_cols = 3, fontsize = 6)
+
+ewe
+
+```
+------------------------------------------------------------------------
+
+END OF REPORT
