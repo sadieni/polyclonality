@@ -3,7 +3,7 @@ This repository contains data and code to reproduce the analysis and results fro
 
 ## Purpose
 The files contained in this repository accompany the manuscript **_Polyclonality overcomes fitness barriers in Apc-driven tumorigenesis_**. The following analyses have been included here:
-1. Differential gene expression and gene set enrichment based on bulk RNA sequencing from major and minor clones (Figure xx)
+1. Differential gene expression and gene set enrichment based on bulk RNA sequencing from major and minor clones (_Figure 2_)
 2. Pipeline for pseudo-bulk RNA sequencing (Figure xx)
 3. Mutational probability analysis in Apc for major, minor and monoclonal samples (Figure xx)
 4. Confetti crypt labelling simulation (_Extended Data Figure 1f_)
